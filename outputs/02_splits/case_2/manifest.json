@@ -1,0 +1,34 @@
+{
+  "case": "case_2",
+  "positives": [
+    "Foraminal stenosis",
+    "Spondylolysthesis"
+  ],
+  "second_rotation_deg": 45,
+  "no_finding_cap_train": 1000,
+  "seed": 42,
+  "git_hash": "unknown",
+  "counts": {
+    "train": {
+      "n_rows": 1365,
+      "n_studies": 817,
+      "Foraminal stenosis": 249,
+      "Spondylolysthesis": 235,
+      "No finding": 896
+    },
+    "internal_val": {
+      "n_rows": 144,
+      "n_studies": 91,
+      "Foraminal stenosis": 22,
+      "Spondylolysthesis": 22,
+      "No finding": 104
+    },
+    "test": {
+      "n_rows": 1186,
+      "n_studies": 640,
+      "Foraminal stenosis": 60,
+      "Spondylolysthesis": 62,
+      "No finding": 1070
+    }
+  }
+}

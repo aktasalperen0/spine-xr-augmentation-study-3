@@ -1,0 +1,30 @@
+{
+  "case": "case_4",
+  "positives": [
+    "Other lesions"
+  ],
+  "second_rotation_deg": 45,
+  "no_finding_cap_train": 1000,
+  "seed": 42,
+  "git_hash": "unknown",
+  "counts": {
+    "train": {
+      "n_rows": 1200,
+      "n_studies": 733,
+      "Other lesions": 302,
+      "No finding": 898
+    },
+    "internal_val": {
+      "n_rows": 133,
+      "n_studies": 82,
+      "Other lesions": 31,
+      "No finding": 102
+    },
+    "test": {
+      "n_rows": 1150,
+      "n_studies": 637,
+      "Other lesions": 80,
+      "No finding": 1070
+    }
+  }
+}

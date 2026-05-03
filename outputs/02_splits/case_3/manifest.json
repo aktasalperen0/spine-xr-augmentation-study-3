@@ -1,0 +1,34 @@
+{
+  "case": "case_3",
+  "positives": [
+    "Osteophytes",
+    "Surgical implant"
+  ],
+  "second_rotation_deg": 45,
+  "no_finding_cap_train": 1000,
+  "seed": 42,
+  "git_hash": "unknown",
+  "counts": {
+    "train": {
+      "n_rows": 4179,
+      "n_studies": 2547,
+      "Osteophytes": 3201,
+      "Surgical implant": 220,
+      "No finding": 891
+    },
+    "internal_val": {
+      "n_rows": 491,
+      "n_studies": 283,
+      "Osteophytes": 374,
+      "Surgical implant": 37,
+      "No finding": 109
+    },
+    "test": {
+      "n_rows": 1978,
+      "n_studies": 982,
+      "Osteophytes": 878,
+      "Surgical implant": 64,
+      "No finding": 1070
+    }
+  }
+}

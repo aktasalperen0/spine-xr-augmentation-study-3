@@ -1,0 +1,27 @@
+project:
+  name: spine-xr-augmentation-study-3
+  seed: 42
+  num_workers: 8
+
+paths:
+  dataset_root: dataset
+  abnormal_train_pngs: dataset/abnormal/train_pngs
+  normal_train_pngs: dataset/normal/train_pngs
+  abnormal_test_pngs: dataset/abnormal/test_pngs
+  normal_test_pngs: dataset/normal/test_pngs
+  abnormal_train_annotations: dataset/abnormal/train_annotations.csv
+  abnormal_test_annotations: dataset/abnormal/test_annotations.csv
+  normal_train_metadata: dataset/normal/train_metadata.csv
+  normal_test_metadata: dataset/normal/test_metadata.csv
+  outputs_root: outputs
+
+# 7 lesion classes + No finding (auxiliary). Order matters for label-table columns.
+classes:
+  - Osteophytes
+  - Disc space narrowing
+  - Other lesions
+  - Foraminal stenosis
+  - Surgical implant
+  - Spondylolysthesis
+  - Vertebral collapse
+  - No finding
