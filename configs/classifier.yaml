@@ -1,0 +1,32 @@
+# Classifier training config (Project 3, Phase 03 baseline).
+# Multi-label sigmoid + BCEWithLogitsLoss (decision D2).
+# Best.pth is selected on Macro F1 over the case's output classes evaluated on the
+# official VinDr test set every epoch (decision D8). internal_val is logged each epoch
+# as a guardrail to detect test-set fitting.
+
+backbones:
+  vgg16:
+    image_size: 224
+    batch_size: 32
+  inception_v3:
+    image_size: 299
+    batch_size: 24
+
+train:
+  epochs: 25
+  optimizer: adamw
+  lr: 0.0001
+  weight_decay: 0.0001
+  scheduler: cosine
+  warmup_epochs: 1
+  amp: false              # MPS-friendly default; flip on for CUDA
+  grad_clip_norm: 1.0
+  num_workers: 4
+
+# Baseline = truly no augmentation (only resize / pad / CLAHE / normalize).
+# Used by Phase 03; later phases override `train_transform` to "traditional" or "hybrid".
+train_transform: baseline_no_aug
+eval_transform: val
+
+# pos_weight clamp for BCEWithLogitsLoss; helps NF-minority Case 3 without exploding gradients.
+pos_weight_clip: 10.0
