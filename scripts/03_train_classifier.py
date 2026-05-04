@@ -43,6 +43,15 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=None, help="Override epochs (smoke tests)")
     ap.add_argument("--out-tag", default="03_baseline",
                     help="Sub-dir under outputs/ to write into")
+    ap.add_argument("--train-csv-root", default=None,
+                    help="Override directory holding per-case train CSV. "
+                         "Default: outputs/<splits-tag>. Example for Phase 04: outputs/04_traditional")
+    ap.add_argument("--train-csv-name", default="train.csv",
+                    help="Filename of the train CSV under <train-csv-root>/<case>/. "
+                         "Default 'train.csv'. Phase 04 uses 'train_traditional.csv'.")
+    ap.add_argument("--splits-tag", default="02_splits",
+                    help="Sub-dir holding internal_val.csv and test.csv. "
+                         "Default '02_splits' — these stay 100%% real across all phases.")
     args = ap.parse_args()
 
     base = load_config(args.config)
@@ -53,8 +62,10 @@ def main() -> None:
     seed = int(cases_cfg.get("seed", base["project"]["seed"]))
     set_seed(seed)
 
-    splits_root = Path(base["paths"]["outputs_root"]) / "02_splits"
-    out_root = Path(base["paths"]["outputs_root"]) / args.out_tag
+    outputs_root = Path(base["paths"]["outputs_root"])
+    splits_root = outputs_root / args.splits_tag
+    train_csv_root = Path(args.train_csv_root) if args.train_csv_root else splits_root
+    out_root = outputs_root / args.out_tag
     out_root.mkdir(parents=True, exist_ok=True)
 
     epochs = args.epochs if args.epochs is not None else int(cls_cfg["train"]["epochs"])
@@ -63,10 +74,13 @@ def main() -> None:
     for case_name, case_body in cases_cfg["cases"].items():
         if args.cases_filter and case_name not in args.cases_filter:
             continue
-        case_dir = splits_root / case_name
-        train_df = pd.read_csv(case_dir / "train.csv")
-        ival_df = pd.read_csv(case_dir / "internal_val.csv")
-        test_df = pd.read_csv(case_dir / "test.csv")
+        # Train CSV may come from a different phase (e.g. Phase 04 traditional, Phase 08 hybrid).
+        # internal_val and test ALWAYS come from --splits-tag (D8: pure real-image splits).
+        train_csv = train_csv_root / case_name / args.train_csv_name
+        train_df = pd.read_csv(train_csv)
+        ival_df = pd.read_csv(splits_root / case_name / "internal_val.csv")
+        test_df = pd.read_csv(splits_root / case_name / "test.csv")
+        log.info(f"[{case_name}] train CSV: {train_csv}")
         label_columns = case_label_columns(case_body)
         log.info(
             f"[{case_name}] train={len(train_df)} internal_val={len(ival_df)} "
