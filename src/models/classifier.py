@@ -31,7 +31,8 @@ def build_classifier(name: str, num_classes: int, pretrained: bool = True) -> nn
         return model
     if name == "inception_v3":
         weights = Inception_V3_Weights.IMAGENET1K_V1 if pretrained else None
-        model = inception_v3(weights=weights, aux_logits=False)
+        model = inception_v3(weights=weights)  
+        model.aux_logits = False             
         in_features = model.fc.in_features
         model.fc = nn.Linear(in_features, num_classes)
         return model
