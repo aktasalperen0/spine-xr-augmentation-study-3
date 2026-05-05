@@ -1,0 +1,82 @@
+# Phase 05 — WGAN training (paper-faithful by default).
+#
+# Decision D5 (plan): one WGAN per minority class, latent=120, image=256x256, weight clipping.
+# We deviate from the paper only on three controllable knobs:
+#   1. Iteration-based schedule (paper says "epochs" but their per-class data is so small
+#      that an epoch = ~3 batches; we use generator-iteration counts for clarity).
+#   2. Optional WGAN-GP toggle as an escape hatch when clip is unstable (paper itself reports
+#      collapse after ~epoch 300 — known weight-clipping pathology). Default OFF.
+#   3. Mixed precision OFF for clip path (interacts badly with weight clipping); ON for GP path.
+
+generator:
+  latent_dim: 120              # paper §4.6 / §4.6.2
+  base_channels: 64            # G base width; final tier = 16 * base = 1024 channels at 4x4
+  out_channels: 1              # grayscale; replicated to 3 channels at classifier-train time
+  image_size: 256              # paper §4.6.2 (Figure 6 caption)
+
+critic:
+  base_channels: 64
+  in_channels: 1
+  image_size: 256
+
+train:
+  # A100-friendly defaults. Tune iterations per class once we see early sample quality.
+  batch_size: 64
+  n_critic: 5                  # paper / Wasserstein standard
+  loss: weight_clip            # 'weight_clip' (paper-faithful, default) | 'gp' (WGAN-GP escape hatch)
+
+  # Optimizer: paper-faithful RMSProp for weight_clip; Adam for GP.
+  optimizer_clip:
+    name: rmsprop
+    lr: 0.00005
+  optimizer_gp:
+    name: adam
+    lr: 0.0001
+    betas: [0.0, 0.9]
+
+  weight_clip_value: 0.01      # used when loss == weight_clip
+  gp_lambda: 10.0              # used when loss == gp
+
+  total_iterations: 20000      # generator iterations (critic iters = 5x this)
+  log_every: 100               # iterations
+  snapshot_every: 1500         # generator iterations between snapshots
+  first_snapshot_at: 5000      # snapshot from this iter onwards (skip noisy early)
+  sample_every: 1500           # write a 4x4 grid of generated samples at this cadence
+  num_sample_images: 16        # 4x4 grid
+
+  # DataLoader (Colab-friendly).
+  num_workers: 4
+  prefetch_factor: 2
+  persistent_workers: true
+  pin_memory: true
+
+  amp: false                   # default OFF for weight_clip path. Trainer turns it ON only when loss==gp.
+  seed: 42
+
+# Which minority classes get a WGAN. Osteophytes is excluded — it's already the abnormal-majority
+# class in case_3 (3201 train rows) and does not need generative oversampling.
+classes:
+  - name: Disc space narrowing
+    case: case_1
+    pool_csv: outputs/02_splits/case_1/train.csv      # WGAN sees ONLY this case's train rows where label==1
+    slug: disc_space_narrowing
+  - name: Vertebral collapse
+    case: case_1
+    pool_csv: outputs/02_splits/case_1/train.csv
+    slug: vertebral_collapse
+  - name: Foraminal stenosis
+    case: case_2
+    pool_csv: outputs/02_splits/case_2/train.csv
+    slug: foraminal_stenosis
+  - name: Spondylolysthesis
+    case: case_2
+    pool_csv: outputs/02_splits/case_2/train.csv
+    slug: spondylolysthesis
+  - name: Surgical implant
+    case: case_3
+    pool_csv: outputs/02_splits/case_3/train.csv
+    slug: surgical_implant
+  - name: Other lesions
+    case: case_4
+    pool_csv: outputs/02_splits/case_4/train.csv
+    slug: other_lesions
