@@ -1,23 +1,18 @@
-"""WGAN training loop — weight-clipping (paper-faithful) by default; WGAN-GP optional.
+"""WGAN training loop — paper-faithful: Wasserstein loss + weight clipping (paper §4.6.2).
 
 One iteration = n_critic critic updates + 1 generator update.
 
-Paper-faithful path (loss == 'weight_clip'):
+Paper-faithful path (the only path):
 - Critic loss   : -E[D(real)] + E[D(G(z))]   (we minimise this)
 - Generator loss: -E[D(G(z))]
-- After each critic step, clamp weights to [-c, +c].
-- Optimizer    : RMSProp (paper) on both.
-
-WGAN-GP escape hatch (loss == 'gp'):
-- Add lambda * E[(||grad D(x_hat)||_2 - 1)^2] to the critic loss.
-- x_hat = eps*real + (1-eps)*fake, eps ~ U(0, 1) per sample.
-- No weight clipping; critic uses InstanceNorm.
-- Optimizer    : Adam (betas (0.0, 0.9)).
-- AMP can be enabled (mixed precision) without weight-clip pathologies.
+- After each critic step, clamp critic conv/linear weights to [-c, +c]. BatchNorm params
+  are NOT clipped (they're scale/shift, not part of the Lipschitz-bounded function).
+- Optimizer    : RMSProp (paper / Arjovsky 2017 standard).
+- No AMP (mixed precision interacts badly with weight clipping).
 
 Snapshots: at every `snapshot_every` generator iterations after `first_snapshot_at`, write
-G/D state_dicts and a 4x4 sample grid PNG. Phase 06 (next milestone) will compute FID per
-snapshot to pick the deployable checkpoint.
+G/D state_dicts and a 4×4 sample grid PNG. Phase 06 (FID) ranks snapshots; Phase 07 generates
+from the chosen one.
 """
 from __future__ import annotations
 
@@ -32,7 +27,7 @@ import torch.nn as nn
 import torchvision.utils as vutils
 from torch.utils.data import DataLoader, RandomSampler
 
-from src.models.wgan import Generator, build_critic_for_loss
+from src.models.wgan import Critic, Generator
 
 
 @dataclass
@@ -51,12 +46,9 @@ class WGANConfig:
 
     batch_size: int = 64
     n_critic: int = 5
-    loss: str = "weight_clip"          # 'weight_clip' | 'gp'
     weight_clip_value: float = 0.01
-    gp_lambda: float = 10.0
 
-    optim_clip: dict = field(default_factory=lambda: {"name": "rmsprop", "lr": 5e-5})
-    optim_gp: dict = field(default_factory=lambda: {"name": "adam", "lr": 1e-4, "betas": (0.0, 0.9)})
+    optim: dict = field(default_factory=lambda: {"name": "rmsprop", "lr": 5e-5})
 
     total_iterations: int = 20000
     log_every: int = 100
@@ -70,7 +62,6 @@ class WGANConfig:
     persistent_workers: bool = True
     pin_memory: bool = True
 
-    amp: bool = False
     seed: int = 42
 
 
@@ -86,23 +77,10 @@ def _make_optim(params, spec: dict):
     name = spec["name"].lower()
     if name == "rmsprop":
         return torch.optim.RMSprop(params, lr=float(spec["lr"]))
-    if name == "adam":
-        betas = spec.get("betas", (0.0, 0.9))
-        return torch.optim.Adam(params, lr=float(spec["lr"]), betas=tuple(betas))
-    raise ValueError(f"unknown optimizer {name!r}")
-
-
-def _gradient_penalty(critic: nn.Module, real: torch.Tensor, fake: torch.Tensor, device) -> torch.Tensor:
-    bs = real.size(0)
-    eps = torch.rand(bs, 1, 1, 1, device=device)
-    x_hat = (eps * real + (1.0 - eps) * fake).requires_grad_(True)
-    score = critic(x_hat)
-    grads = torch.autograd.grad(
-        outputs=score.sum(), inputs=x_hat,
-        create_graph=True, retain_graph=True, only_inputs=True,
-    )[0]
-    grads = grads.view(bs, -1)
-    return ((grads.norm(2, dim=1) - 1.0) ** 2).mean()
+    raise ValueError(
+        f"WGAN-clip is paper-faithful only with RMSProp; got {name!r}. "
+        "Adam is intentionally not supported in this code path."
+    )
 
 
 def _save_sample_grid(G: Generator, fixed_z: torch.Tensor, out_path: Path) -> None:
@@ -117,9 +95,22 @@ def _save_sample_grid(G: Generator, fixed_z: torch.Tensor, out_path: Path) -> No
     vutils.save_image(grid, str(out_path))
 
 
+def _clip_critic(D: nn.Module, clip_value: float) -> None:
+    """Clip ONLY conv & linear weights — not BatchNorm scale/shift."""
+    with torch.no_grad():
+        for m in D.modules():
+            if isinstance(m, (nn.Conv2d, nn.Linear)):
+                m.weight.clamp_(-clip_value, clip_value)
+                if m.bias is not None:
+                    m.bias.clamp_(-clip_value, clip_value)
+
+
 def train_wgan(cfg: WGANConfig, dataset, log) -> dict:
     device = _select_device()
-    log.info(f"[wgan/{cfg.class_slug}] device={device.type}  loss={cfg.loss}  N_pool={len(dataset)}")
+    log.info(
+        f"[wgan/{cfg.class_slug}] device={device.type}  loss=weight_clip  "
+        f"n_pool={len(dataset)}  clip=±{cfg.weight_clip_value}  n_critic={cfg.n_critic}"
+    )
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -141,26 +132,15 @@ def train_wgan(cfg: WGANConfig, dataset, log) -> dict:
         latent_dim=cfg.latent_dim, base_channels=cfg.g_base_channels,
         out_channels=cfg.out_channels, image_size=cfg.image_size,
     ).to(device)
-    D = build_critic_for_loss(
-        cfg.loss,
+    D = Critic(
         in_channels=cfg.out_channels,
         base_channels=cfg.d_base_channels,
         image_size=cfg.image_size,
+        weight_clip_value=cfg.weight_clip_value,
     ).to(device)
 
-    if cfg.loss == "weight_clip":
-        opt_g = _make_optim(G.parameters(), cfg.optim_clip)
-        opt_d = _make_optim(D.parameters(), cfg.optim_clip)
-        amp_enabled = False  # AMP + weight clipping is brittle.
-    elif cfg.loss == "gp":
-        opt_g = _make_optim(G.parameters(), cfg.optim_gp)
-        opt_d = _make_optim(D.parameters(), cfg.optim_gp)
-        amp_enabled = bool(cfg.amp) and device.type == "cuda"
-    else:
-        raise ValueError(cfg.loss)
-
-    scaler_d = torch.amp.GradScaler("cuda", enabled=amp_enabled)
-    scaler_g = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    opt_g = _make_optim(G.parameters(), cfg.optim)
+    opt_d = _make_optim(D.parameters(), cfg.optim)
 
     out = Path(cfg.out_dir)
     (out / "checkpoints").mkdir(parents=True, exist_ok=True)
@@ -168,7 +148,7 @@ def train_wgan(cfg: WGANConfig, dataset, log) -> dict:
     log_csv = out / "log.csv"
     log_fh = open(log_csv, "w", newline="")
     writer = csv.writer(log_fh)
-    writer.writerow(["g_iter", "d_loss", "g_loss", "d_real_mean", "d_fake_mean", "gp"])
+    writer.writerow(["g_iter", "d_loss", "g_loss", "d_real_mean", "d_fake_mean"])
 
     fixed_z = torch.randn(cfg.num_sample_images, cfg.latent_dim, device=device)
 
@@ -191,81 +171,57 @@ def train_wgan(cfg: WGANConfig, dataset, log) -> dict:
         d_loss_acc = 0.0
         d_real_acc = 0.0
         d_fake_acc = 0.0
-        gp_acc = 0.0
         for _ in range(cfg.n_critic):
             real = next_real()
             bs = real.size(0)
             z = torch.randn(bs, cfg.latent_dim, device=device)
 
             opt_d.zero_grad(set_to_none=True)
-            with torch.amp.autocast("cuda", enabled=amp_enabled):
-                with torch.no_grad():
-                    fake = G(z)
-                d_real = D(real)
-                d_fake = D(fake)
-                d_loss = -d_real.mean() + d_fake.mean()
-                if cfg.loss == "gp":
-                    gp = _gradient_penalty(D, real, fake.detach(), device)
-                    d_loss = d_loss + cfg.gp_lambda * gp
-                else:
-                    gp = torch.tensor(0.0, device=device)
+            with torch.no_grad():
+                fake = G(z)
+            d_real = D(real)
+            d_fake = D(fake)
+            d_loss = -d_real.mean() + d_fake.mean()
+            d_loss.backward()
+            opt_d.step()
 
-            if amp_enabled:
-                scaler_d.scale(d_loss).backward()
-                scaler_d.step(opt_d)
-                scaler_d.update()
-            else:
-                d_loss.backward()
-                opt_d.step()
-
-            if cfg.loss == "weight_clip":
-                with torch.no_grad():
-                    for p in D.parameters():
-                        p.clamp_(-cfg.weight_clip_value, cfg.weight_clip_value)
+            _clip_critic(D, cfg.weight_clip_value)
 
             d_loss_acc += float(d_loss.item())
             d_real_acc += float(d_real.mean().item())
             d_fake_acc += float(d_fake.mean().item())
-            gp_acc += float(gp.item())
 
         d_loss_avg = d_loss_acc / cfg.n_critic
         d_real_avg = d_real_acc / cfg.n_critic
         d_fake_avg = d_fake_acc / cfg.n_critic
-        gp_avg = gp_acc / cfg.n_critic
 
         # ----- Generator update -----
         z = torch.randn(cfg.batch_size, cfg.latent_dim, device=device)
         opt_g.zero_grad(set_to_none=True)
-        with torch.amp.autocast("cuda", enabled=amp_enabled):
-            fake = G(z)
-            g_loss = -D(fake).mean()
-        if amp_enabled:
-            scaler_g.scale(g_loss).backward()
-            scaler_g.step(opt_g)
-            scaler_g.update()
-        else:
-            g_loss.backward()
-            opt_g.step()
+        fake = G(z)
+        g_loss = -D(fake).mean()
+        g_loss.backward()
+        opt_g.step()
 
         writer.writerow([g_iter,
                          f"{d_loss_avg:.6f}",
                          f"{float(g_loss.item()):.6f}",
                          f"{d_real_avg:.6f}",
-                         f"{d_fake_avg:.6f}",
-                         f"{gp_avg:.6f}"])
+                         f"{d_fake_avg:.6f}"])
 
         if g_iter % cfg.log_every == 0:
             log.info(
                 f"[wgan/{cfg.class_slug}] iter {g_iter}/{cfg.total_iterations} "
                 f"d_loss={d_loss_avg:.4f} g_loss={float(g_loss.item()):.4f} "
                 f"d_real={d_real_avg:.4f} d_fake={d_fake_avg:.4f}"
-                + (f" gp={gp_avg:.4f}" if cfg.loss == "gp" else "")
             )
 
         if g_iter % cfg.sample_every == 0 or g_iter == cfg.total_iterations:
             _save_sample_grid(G, fixed_z, out / "samples" / f"iter_{g_iter:06d}.png")
 
-        if g_iter >= cfg.first_snapshot_at and (g_iter % cfg.snapshot_every == 0 or g_iter == cfg.total_iterations):
+        if g_iter >= cfg.first_snapshot_at and (
+            g_iter % cfg.snapshot_every == 0 or g_iter == cfg.total_iterations
+        ):
             ckpt_path = out / "checkpoints" / f"iter_{g_iter:06d}.pt"
             torch.save({
                 "g_iter": g_iter,
@@ -277,7 +233,8 @@ def train_wgan(cfg: WGANConfig, dataset, log) -> dict:
                     "out_channels": cfg.out_channels,
                     "g_base_channels": cfg.g_base_channels,
                     "d_base_channels": cfg.d_base_channels,
-                    "loss": cfg.loss,
+                    "loss": "weight_clip",
+                    "weight_clip_value": cfg.weight_clip_value,
                     "class_name": cfg.class_name,
                     "class_slug": cfg.class_slug,
                 },
@@ -291,7 +248,7 @@ def train_wgan(cfg: WGANConfig, dataset, log) -> dict:
         "class_slug": cfg.class_slug,
         "case": cfg.case,
         "n_pool": int(len(dataset)),
-        "loss": cfg.loss,
+        "loss": "weight_clip",
         "total_iterations": cfg.total_iterations,
         "snapshots": snapshots,
         "out_dir": str(out),

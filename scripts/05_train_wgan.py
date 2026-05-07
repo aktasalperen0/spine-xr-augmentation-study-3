@@ -1,8 +1,8 @@
-"""Phase 05: train one WGAN per minority class (paper §4.6.2; plan D5).
+"""Phase 05: train one WGAN per minority class — paper-faithful weight clipping (paper §4.6.2).
 
 Per class entry in configs/wgan.yaml:
 - read pool CSV (a case's train.csv) and filter to rows where the target class column == 1
-- run WGAN training (weight-clip default, GP optional via --loss gp)
+- run paper-faithful WGAN training (Wasserstein loss + weight clipping)
 - write outputs/05_wgan/<case>/<class_slug>/{checkpoints/, samples/, log.csv, manifest.json}
 
 Osteophytes is intentionally excluded (already abnormal-majority in case_3).
@@ -10,8 +10,7 @@ Osteophytes is intentionally excluded (already abnormal-majority in case_3).
 Usage:
     python scripts/05_train_wgan.py                                   # all 6 minority classes
     python scripts/05_train_wgan.py --classes-filter "Vertebral collapse" "Other lesions"
-    python scripts/05_train_wgan.py --iterations 1000 --classes-filter "Vertebral collapse"   # smoke
-    python scripts/05_train_wgan.py --loss gp                          # WGAN-GP escape hatch (full sweep)
+    python scripts/05_train_wgan.py --iterations 600 --classes-filter "Vertebral collapse"  # smoke
 """
 from __future__ import annotations
 
@@ -38,8 +37,6 @@ def main() -> None:
                     help="Limit to specific class names, e.g. --classes-filter \"Vertebral collapse\"")
     ap.add_argument("--iterations", type=int, default=None,
                     help="Override total_iterations (smoke runs)")
-    ap.add_argument("--loss", default=None, choices=["weight_clip", "gp"],
-                    help="Override loss kind. Default = configs/wgan.yaml's train.loss (weight_clip).")
     ap.add_argument("--out-tag", default="05_wgan",
                     help="Sub-dir under outputs/. Default 05_wgan.")
     args = ap.parse_args()
@@ -53,7 +50,6 @@ def main() -> None:
     out_root.mkdir(parents=True, exist_ok=True)
 
     iterations = args.iterations if args.iterations is not None else int(wcfg["train"]["total_iterations"])
-    loss_kind = args.loss if args.loss is not None else wcfg["train"]["loss"]
 
     summaries: list[dict] = []
     for entry in wcfg["classes"]:
@@ -80,11 +76,8 @@ def main() -> None:
             d_base_channels=int(wcfg["critic"]["base_channels"]),
             batch_size=int(wcfg["train"]["batch_size"]),
             n_critic=int(wcfg["train"]["n_critic"]),
-            loss=loss_kind,
             weight_clip_value=float(wcfg["train"]["weight_clip_value"]),
-            gp_lambda=float(wcfg["train"]["gp_lambda"]),
-            optim_clip=dict(wcfg["train"]["optimizer_clip"]),
-            optim_gp=dict(wcfg["train"]["optimizer_gp"]),
+            optim=dict(wcfg["train"]["optimizer"]),
             total_iterations=iterations,
             log_every=int(wcfg["train"]["log_every"]),
             snapshot_every=int(wcfg["train"]["snapshot_every"]),
@@ -95,10 +88,9 @@ def main() -> None:
             prefetch_factor=int(wcfg["train"]["prefetch_factor"]),
             persistent_workers=bool(wcfg["train"]["persistent_workers"]),
             pin_memory=bool(wcfg["train"]["pin_memory"]),
-            amp=bool(wcfg["train"]["amp"]),
             seed=int(wcfg["train"].get("seed", 42)),
         )
-        log.info(f"=== Training WGAN for {entry['name']} (pool={len(ds)}, loss={loss_kind}) ===")
+        log.info(f"=== Training WGAN for {entry['name']} (pool={len(ds)}, weight-clip paper-faithful) ===")
         summary = train_wgan(cfg, ds, log)
         (out_dir / "manifest.json").write_text(json.dumps(summary, indent=2))
         summaries.append(summary)

@@ -1,12 +1,11 @@
-# Phase 05 — WGAN training (paper-faithful by default).
+# Phase 05 — WGAN training (paper-faithful, weight-clipping only).
 #
-# Decision D5 (plan): one WGAN per minority class, latent=120, image=256x256, weight clipping.
-# We deviate from the paper only on three controllable knobs:
-#   1. Iteration-based schedule (paper says "epochs" but their per-class data is so small
-#      that an epoch = ~3 batches; we use generator-iteration counts for clarity).
-#   2. Optional WGAN-GP toggle as an escape hatch when clip is unstable (paper itself reports
-#      collapse after ~epoch 300 — known weight-clipping pathology). Default OFF.
-#   3. Mixed precision OFF for clip path (interacts badly with weight clipping); ON for GP path.
+# Reference: Elakiya & Anand §4.6.2 + Figure 6 caption — "Wasserstein loss with weight
+# clipping", DCGAN base architecture (§4.6.1) which means BatchNorm in the critic.
+#
+# This config has no `loss` switch and no GP knobs. The only training path is paper-faithful
+# Wasserstein-with-weight-clipping. RMSProp is the only optimizer; lr=5e-5 (Arjovsky 2017
+# standard, also matches paper's WGAN section); n_critic=5; clip ±0.01.
 
 generator:
   latent_dim: 120              # paper §4.6 / §4.6.2
@@ -18,27 +17,22 @@ critic:
   base_channels: 64
   in_channels: 1
   image_size: 256
+  # BatchNorm in the critic is INHERITED from the DCGAN base (paper §4.6.1):
+  # "the downsampling block consists of convolutional, batch normalization, and Leaky ReLU".
+  # First block keeps no-norm (DCGAN convention); blocks 1-5 carry BN. Implemented in
+  # src/models/wgan.py::Critic.
 
 train:
-  # A100-friendly defaults. Tune iterations per class once we see early sample quality.
   batch_size: 64
-  n_critic: 5                  # paper / Wasserstein standard
-  loss: weight_clip            # 'weight_clip' (paper-faithful, default) | 'gp' (WGAN-GP escape hatch)
+  n_critic: 5                  # paper-aligned Wasserstein standard
+  weight_clip_value: 0.01      # paper-aligned (Figure 6 caption)
 
-  # Optimizer: paper-faithful RMSProp for weight_clip; Adam for GP.
-  optimizer_clip:
-    name: rmsprop
+  optimizer:
+    name: rmsprop              # ONLY RMSProp is allowed in this code path (no Adam)
     lr: 0.00005
-  optimizer_gp:
-    name: adam
-    lr: 0.0001
-    betas: [0.0, 0.9]
-
-  weight_clip_value: 0.01      # used when loss == weight_clip
-  gp_lambda: 10.0              # used when loss == gp
 
   total_iterations: 20000      # generator iterations (critic iters = 5x this)
-  log_every: 100               # iterations
+  log_every: 100
   snapshot_every: 1500         # generator iterations between snapshots
   first_snapshot_at: 5000      # snapshot from this iter onwards (skip noisy early)
   sample_every: 1500           # write a 4x4 grid of generated samples at this cadence
@@ -50,15 +44,14 @@ train:
   persistent_workers: true
   pin_memory: true
 
-  amp: false                   # default OFF for weight_clip path. Trainer turns it ON only when loss==gp.
   seed: 42
 
-# Which minority classes get a WGAN. Osteophytes is excluded — it's already the abnormal-majority
-# class in case_3 (3201 train rows) and does not need generative oversampling.
+# Which minority classes get a WGAN. Osteophytes is excluded — already abnormal-majority in
+# case_3 (3201 train rows). For full paper-coverage of Cases 1–3 you can add it back.
 classes:
   - name: Disc space narrowing
     case: case_1
-    pool_csv: outputs/02_splits/case_1/train.csv      # WGAN sees ONLY this case's train rows where label==1
+    pool_csv: outputs/02_splits/case_1/train.csv
     slug: disc_space_narrowing
   - name: Vertebral collapse
     case: case_1
