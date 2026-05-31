@@ -26,3 +26,12 @@ internal_val_fraction: 0.10
 
 # Reproducibility: a single seed drives both NF subsampling and internal-val splitting.
 seed: 42
+
+# ROI-patch pivot (current milestone). The classifier/WGAN operate on lesion crops, not whole
+# images, because lesions occupy only 0.15%-3.1% of a full spine X-ray.
+roi:
+  margin: 0.20              # expand each bbox by 20% per side before cropping (lesion + small context)
+  nf_patches_per_image: 1  # No-Finding patches emitted per NF image (matched-size, plan R3)
+  store_size: 256          # patches saved on disk at this square resolution (downstream resizes from here)
+  seed: 42                 # drives NF random-crop sampling
+

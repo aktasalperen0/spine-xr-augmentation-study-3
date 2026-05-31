@@ -168,11 +168,13 @@ def main() -> None:
     log.info(f"[{args.case}] WGAN-aug rows written: {len(wgan_aug_df)} (= {len(wgan_real_paths)} × {len(recipe)})")
 
     # ---- 4) Combine and write ----
+    # reindex (not []) so WGAN rows that lack the ROI manifest's extra columns
+    # (lesion_type, src_image_id) align by filling NaN instead of raising KeyError.
     parts = [trad_df]
     if len(wgan_real_df):
-        parts.append(wgan_real_df[trad_df.columns])
+        parts.append(wgan_real_df.reindex(columns=trad_df.columns))
     if len(wgan_aug_df):
-        parts.append(wgan_aug_df[trad_df.columns])
+        parts.append(wgan_aug_df.reindex(columns=trad_df.columns))
     combined = pd.concat(parts, ignore_index=True)
     combined.to_csv(case_out / "train_hybrid.csv", index=False)
 

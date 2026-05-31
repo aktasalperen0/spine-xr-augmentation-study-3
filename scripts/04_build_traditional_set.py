@@ -45,14 +45,19 @@ def main() -> None:
     ap.add_argument("--config", default="configs/base.yaml")
     ap.add_argument("--cases", default="configs/cases.yaml")
     ap.add_argument("--cases-filter", nargs="*", default=None)
+    ap.add_argument("--splits-tag", default="02_splits",
+                    help="Sub-dir under outputs/ holding per-case train.csv to augment. "
+                         "ROI pivot: pass 02b_roi to augment lesion patches.")
+    ap.add_argument("--out-tag", default="04_traditional",
+                    help="Output sub-dir under outputs/. ROI pivot: pass 04_roi_traditional.")
     args = ap.parse_args()
 
     base = load_config(args.config)
     cases_cfg = load_config(args.cases)
     log = get_logger()
 
-    splits_root = Path(base["paths"]["outputs_root"]) / "02_splits"
-    out_root = Path(base["paths"]["outputs_root"]) / "04_traditional"
+    splits_root = Path(base["paths"]["outputs_root"]) / args.splits_tag
+    out_root = Path(base["paths"]["outputs_root"]) / args.out_tag
     out_root.mkdir(parents=True, exist_ok=True)
 
     overall_counts: dict = {}

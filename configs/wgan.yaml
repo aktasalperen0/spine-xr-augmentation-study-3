@@ -11,12 +11,12 @@ generator:
   latent_dim: 120              # paper §4.6 / §4.6.2
   base_channels: 64            # G base width; final tier = 16 * base = 1024 channels at 4x4
   out_channels: 1              # grayscale; replicated to 3 channels at classifier-train time
-  image_size: 256              # paper §4.6.2 (Figure 6 caption)
+  image_size: 128              # ROI-patch pivot: lesion patches are small; 128 is faster/stabler than 256
 
 critic:
   base_channels: 64
   in_channels: 1
-  image_size: 256
+  image_size: 128
   # BatchNorm in the critic is INHERITED from the DCGAN base (paper §4.6.1):
   # "the downsampling block consists of convolutional, batch normalization, and Leaky ReLU".
   # First block keeps no-norm (DCGAN convention); blocks 1-5 carry BN. Implemented in
@@ -31,11 +31,12 @@ train:
     name: rmsprop              # ONLY RMSProp is allowed in this code path (no Adam)
     lr: 0.00005
 
-  total_iterations: 20000      # generator iterations (critic iters = 5x this)
+  total_iterations: 12000      # generator iterations (critic iters = 5x this). Patches converge
+                               # faster than whole images, so fewer iters than the 256 era.
   log_every: 100
-  snapshot_every: 1500         # generator iterations between snapshots
-  first_snapshot_at: 5000      # snapshot from this iter onwards (skip noisy early)
-  sample_every: 1500           # write a 4x4 grid of generated samples at this cadence
+  snapshot_every: 1000         # generator iterations between snapshots
+  first_snapshot_at: 3000      # snapshot from this iter onwards (skip noisy early)
+  sample_every: 1000           # write a 4x4 grid of generated samples at this cadence
   num_sample_images: 16        # 4x4 grid
 
   # DataLoader (Colab-friendly).
@@ -48,28 +49,30 @@ train:
 
 # Which minority classes get a WGAN. Osteophytes is excluded — already abnormal-majority in
 # case_3 (3201 train rows). For full paper-coverage of Cases 1–3 you can add it back.
+# pool_csv points at the ROI patch manifest (built by 02b_build_roi_patches.py); the WGAN trains
+# on lesion crops, filtered by the class column.
 classes:
   - name: Disc space narrowing
     case: case_1
-    pool_csv: outputs/02_splits/case_1/train.csv
+    pool_csv: outputs/02b_roi/case_1/train.csv
     slug: disc_space_narrowing
   - name: Vertebral collapse
     case: case_1
-    pool_csv: outputs/02_splits/case_1/train.csv
+    pool_csv: outputs/02b_roi/case_1/train.csv
     slug: vertebral_collapse
   - name: Foraminal stenosis
     case: case_2
-    pool_csv: outputs/02_splits/case_2/train.csv
+    pool_csv: outputs/02b_roi/case_2/train.csv
     slug: foraminal_stenosis
   - name: Spondylolysthesis
     case: case_2
-    pool_csv: outputs/02_splits/case_2/train.csv
+    pool_csv: outputs/02b_roi/case_2/train.csv
     slug: spondylolysthesis
   - name: Surgical implant
     case: case_3
-    pool_csv: outputs/02_splits/case_3/train.csv
+    pool_csv: outputs/02b_roi/case_3/train.csv
     slug: surgical_implant
   - name: Other lesions
     case: case_4
-    pool_csv: outputs/02_splits/case_4/train.csv
+    pool_csv: outputs/02b_roi/case_4/train.csv
     slug: other_lesions
