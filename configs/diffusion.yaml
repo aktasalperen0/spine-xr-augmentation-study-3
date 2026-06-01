@@ -1,0 +1,41 @@
+# Phase 05d — MONAI pixel-space DDPM on 128x128 ROI lesion patches (advisor's diffusion arm).
+#
+# Pixel-space DDPM (NOT latent diffusion): at 128px we don't need a VAE, and the VAE is exactly
+# what collapsed in Project 2. MONAI's DiffusionModelUNet + DDPMScheduler handle the hard parts.
+
+unet:
+  image_size: 128
+  in_channels: 1
+  out_channels: 1
+  channels: [64, 128, 128, 256]      # per-resolution feature widths (4 levels: 128->64->32->16)
+  attention_levels: [false, false, true, true]
+  num_res_blocks: 2
+  num_head_channels: 64
+
+scheduler:
+  num_train_timesteps: 1000
+  schedule: linear_beta
+  beta_start: 0.0001
+  beta_end: 0.02
+
+train:
+  batch_size: 32
+  lr: 0.00025
+  total_iterations: 8000          # patches are small/uniform; converges fast
+  log_every: 100
+  sample_every: 1000              # write a sample grid
+  ckpt_every: 1000
+  first_ckpt_at: 2000
+  num_sample_images: 16
+  num_workers: 4
+  amp: true                       # CUDA mixed precision (A100)
+  seed: 42
+
+# Same per-class pools as the (retired) WGAN config — ROI patch manifests, filtered by class.
+classes:
+  - { name: Disc space narrowing, case: case_1, pool_csv: outputs/02b_roi/case_1/train.csv, slug: disc_space_narrowing }
+  - { name: Vertebral collapse,   case: case_1, pool_csv: outputs/02b_roi/case_1/train.csv, slug: vertebral_collapse }
+  - { name: Foraminal stenosis,   case: case_2, pool_csv: outputs/02b_roi/case_2/train.csv, slug: foraminal_stenosis }
+  - { name: Spondylolysthesis,    case: case_2, pool_csv: outputs/02b_roi/case_2/train.csv, slug: spondylolysthesis }
+  - { name: Surgical implant,     case: case_3, pool_csv: outputs/02b_roi/case_3/train.csv, slug: surgical_implant }
+  - { name: Other lesions,        case: case_4, pool_csv: outputs/02b_roi/case_4/train.csv, slug: other_lesions }

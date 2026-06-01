@@ -1,0 +1,29 @@
+# Phase 05p — Progressive-growing GAN on 128x128 ROI lesion patches (advisor's GAN arm).
+# WGAN-GP loss, equalized-LR convs, pixelnorm (G), minibatch-stddev (D), fade-in growing.
+
+model:
+  latent_dim: 128
+  out_channels: 1
+  max_depth: 5          # 4,8,16,32,64,128
+
+train:
+  fade_iters: 4000      # per stage fade-in
+  stab_iters: 4000      # per stage stabilise
+  gp_lambda: 10.0
+  drift_eps: 0.001
+  lr: 0.001
+  betas: [0.0, 0.99]
+  batch_per_res: {4: 128, 8: 128, 16: 64, 32: 32, 64: 16, 128: 16}
+  log_every: 100
+  sample_every: 1000
+  num_sample_images: 16
+  num_workers: 4
+  seed: 42
+
+classes:
+  - { name: Disc space narrowing, case: case_1, pool_csv: outputs/02b_roi/case_1/train.csv, slug: disc_space_narrowing }
+  - { name: Vertebral collapse,   case: case_1, pool_csv: outputs/02b_roi/case_1/train.csv, slug: vertebral_collapse }
+  - { name: Foraminal stenosis,   case: case_2, pool_csv: outputs/02b_roi/case_2/train.csv, slug: foraminal_stenosis }
+  - { name: Spondylolysthesis,    case: case_2, pool_csv: outputs/02b_roi/case_2/train.csv, slug: spondylolysthesis }
+  - { name: Surgical implant,     case: case_3, pool_csv: outputs/02b_roi/case_3/train.csv, slug: surgical_implant }
+  - { name: Other lesions,        case: case_4, pool_csv: outputs/02b_roi/case_4/train.csv, slug: other_lesions }

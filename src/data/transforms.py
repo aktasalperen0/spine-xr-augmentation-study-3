@@ -39,9 +39,32 @@ def baseline_no_aug_transform(image_size: int) -> A.Compose:
     return val_transform(image_size)
 
 
+def roi_train_online_transform(image_size: int) -> A.Compose:
+    """Online, biologically-consistent augmentation for ROI lesion patches (advisor F4).
+
+    - Affine: ±10° rotation + 0.9–1.1 scale + 5% translate (patient pose / framing variation).
+    - HorizontalFlip: harmless on a lesion patch, adds variety.
+    - RandomBrightnessContrast: the X-ray-valid part of ColorJitter (kVp/mAs dose differences).
+    - ElasticTransform: simulates biological bone variation without cropping/tearing.
+    No vertical flip and no crop-away (would drop the lesion). Applied to the TRAIN split only.
+    """
+    return A.Compose([
+        *_resize_pad(image_size),
+        A.Affine(rotate=(-10, 10), scale=(0.9, 1.1), translate_percent=(0.0, 0.05),
+                 border_mode=0, fill=0, p=0.8),
+        A.HorizontalFlip(p=0.5),
+        A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+        A.ElasticTransform(alpha=20.0, sigma=5.0, p=0.3),
+        _clahe(),
+        *_normalize_to_tensor(),
+    ])
+
+
 def build_transform(name: str, image_size: int) -> A.Compose:
     if name in ("val", "eval"):
         return val_transform(image_size)
     if name == "baseline_no_aug":
         return baseline_no_aug_transform(image_size)
+    if name == "roi_train_online":
+        return roi_train_online_transform(image_size)
     raise ValueError(f"unknown transform preset: {name}")

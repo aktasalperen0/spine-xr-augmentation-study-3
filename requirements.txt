@@ -4,4 +4,11 @@ pyyaml
 scikit-learn
 pillow
 tqdm
-# torch / torchvision / albumentations / pytorch-fid added in later milestones
+opencv-python-headless
+albumentations>=2.0,<3.0
+tabulate
+# Colab already ships torch + torchvision (CUDA build); do not pin here.
+# Generative finale:
+monai>=1.3
+monai-generative
+pytorch-fid

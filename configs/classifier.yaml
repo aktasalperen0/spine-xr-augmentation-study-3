@@ -4,13 +4,12 @@
 # official VinDr test set every epoch (decision D8). internal_val is logged each epoch
 # as a guardrail to detect test-set fitting.
 
+# Advisor finale: single backbone = DenseNet-121 (CheXNet-style, feature-reuse preserves
+# faint low-level lesion cues on 128px ROI patches). VGG/Inception removed.
 backbones:
-  vgg16:
+  densenet121:
     image_size: 224
     batch_size: 32
-  inception_v3:
-    image_size: 299
-    batch_size: 24
 
 train:
   epochs: 25

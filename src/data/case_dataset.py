@@ -57,3 +57,20 @@ def compute_pos_weight(
         w = neg / max(pos, 1)
         weights.append(min(w, clip))
     return torch.tensor(weights, dtype=torch.float32)
+
+
+def compute_sample_weights(df: pd.DataFrame, label_columns: list[str]) -> "np.ndarray":
+    """Per-sample weight for a class-balanced WeightedRandomSampler.
+
+    Each ROI patch is single-label (one lesion class OR No finding). A sample's weight is the
+    inverse frequency of its (single) positive class, so minority classes are oversampled —
+    this is the advisor's "per-class augmentation coefficient" applied at the sampling level.
+    """
+    labels = df[label_columns].to_numpy().astype(int)
+    class_counts = labels.sum(axis=0).astype(float)              # per-class positive counts
+    class_counts[class_counts == 0] = 1.0
+    inv = 1.0 / class_counts
+    # Sample weight = inverse-freq of its active class(es); for single-label this is one term.
+    w = (labels * inv[None, :]).sum(axis=1)
+    w[w == 0] = inv.min()                                        # safety for any all-zero row
+    return w

@@ -16,9 +16,9 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
-from src.data.case_dataset import CaseDataset, compute_pos_weight
+from src.data.case_dataset import CaseDataset, compute_pos_weight, compute_sample_weights
 from src.data.transforms import build_transform
 from src.eval.metrics import format_metrics_md, per_class_metrics
 from src.models.classifier import build_classifier
@@ -43,6 +43,8 @@ class TrainerConfig:
     out_dir: Path
     seed: int = 42
     log_every: int = 50
+    balanced_sampler: bool = False          # WeightedRandomSampler (per-class inverse-freq) on train
+    select_metric_split: str = "test"       # "val" (CV: select best.pth on fold-val) | "test" (legacy)
     extra: dict = field(default_factory=dict)
 
 
@@ -54,12 +56,13 @@ def _select_device() -> torch.device:
     return torch.device("cpu")
 
 
-def _make_loader(df: pd.DataFrame, label_columns, transform, batch_size, num_workers, shuffle):
+def _make_loader(df: pd.DataFrame, label_columns, transform, batch_size, num_workers, shuffle, sampler=None):
     ds = CaseDataset(df, label_columns, transform)
     return DataLoader(
         ds,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=(shuffle and sampler is None),
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=False,
         drop_last=False,
@@ -110,8 +113,16 @@ def train_one_cell(
     train_tf = build_transform(cfg.train_transform, cfg.image_size)
     eval_tf = build_transform(cfg.eval_transform, cfg.image_size)
 
+    train_sampler = None
+    if cfg.balanced_sampler:
+        sw = compute_sample_weights(train_df, cfg.label_columns)
+        train_sampler = WeightedRandomSampler(
+            weights=torch.as_tensor(sw, dtype=torch.double), num_samples=len(sw), replacement=True
+        )
+        log.info(f"[{cfg.case_name}/{cfg.backbone}] balanced sampler ON (n={len(sw)})")
     train_loader = _make_loader(
-        train_df, cfg.label_columns, train_tf, cfg.batch_size, cfg.num_workers, shuffle=True
+        train_df, cfg.label_columns, train_tf, cfg.batch_size, cfg.num_workers,
+        shuffle=True, sampler=train_sampler,
     )
     val_loader = (
         _make_loader(internal_val_df, cfg.label_columns, eval_tf, cfg.batch_size, cfg.num_workers, shuffle=False)
@@ -134,7 +145,7 @@ def train_one_cell(
     out_dir.mkdir(parents=True, exist_ok=True)
     epoch_log_rows: list[dict] = []
 
-    best = {"epoch": -1, "test_macro_f1": -1.0, "test_metrics": None, "val_macro_f1": float("nan")}
+    best = {"epoch": -1, "sel": -1.0, "test_macro_f1": -1.0, "test_metrics": None, "val_macro_f1": float("nan")}
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
@@ -177,9 +188,16 @@ def train_one_cell(
             f"test_macro_f1={row['test_macro_f1']:.4f}"
         )
 
-        if test_metrics["macro_f1"] > best["test_macro_f1"]:
+        # Model-selection metric: fold-val macro-F1 in CV mode (keeps test unbiased), else test.
+        if cfg.select_metric_split == "val" and val_metrics is not None:
+            sel_metric = val_metrics["macro_f1"]
+        else:
+            sel_metric = test_metrics["macro_f1"]
+
+        if sel_metric > best["sel"]:
             best = {
                 "epoch": epoch,
+                "sel": sel_metric,
                 "test_macro_f1": test_metrics["macro_f1"],
                 "test_metrics": test_metrics,
                 "val_macro_f1": row["val_macro_f1"],
