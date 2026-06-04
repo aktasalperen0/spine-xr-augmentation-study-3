@@ -12,3 +12,6 @@ tabulate
 monai>=1.3
 monai-generative
 pytorch-fid
+# Reporting:
+matplotlib
+seaborn
