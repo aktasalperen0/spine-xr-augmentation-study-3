@@ -367,6 +367,56 @@ def fig_montages(outputs_root, fig_dir, log):
         savefig(fig, fig_dir, f"montage_{slug}")
 
 
+# ---------------------------------------------------------------- patient-level (honest test)
+
+PATIENT_CONDS = [("baseline_patient", "Baseline"), ("traditional_patient", "Traditional"),
+                 ("diffusion_patient", "DDPM"), ("progan_patient", "ProGAN")]
+DISEASES7 = ["Osteophytes", "Disc space narrowing", "Other lesions", "Foraminal stenosis",
+             "Surgical implant", "Spondylolysthesis", "Vertebral collapse"]
+
+
+def load_patient(outputs_root: Path):
+    out = {}
+    for tag, lbl in PATIENT_CONDS:
+        mp = outputs_root / tag / "metrics.json"
+        if mp.exists():
+            out[lbl] = json.loads(mp.read_text())
+    return out
+
+
+def patient_outputs(outputs_root, fig_dir, tab_dir, log):
+    pat = load_patient(outputs_root)
+    if not pat:
+        log.info("no patient-level metrics found — skipping patient-level section")
+        return
+    # per-disease F1 table (disease × condition) + macro row
+    rows = []
+    for d in DISEASES7:
+        row = {"disease": d}
+        for lbl, m in pat.items():
+            pd_ = m.get("per_disease", {}).get(d)
+            row[lbl] = round(pd_["f1"], 4) if pd_ else None
+        rows.append(row)
+    macro = {"disease": "MACRO"}
+    for lbl, m in pat.items():
+        macro[lbl] = round(m.get("patient_macro_f1", float("nan")), 4)
+    rows.append(macro)
+    pdf = pd.DataFrame(rows)
+    tab_dir.mkdir(parents=True, exist_ok=True)
+    (tab_dir / "patient_level_f1.md").write_text("# Patient-level F1 (honest, full-image test)\n\n" + pdf.to_markdown(index=False))
+    (tab_dir / "patient_level_f1.tex").write_text(pdf.to_latex(index=False, caption="Patient-level per-disease F1 (full-image, no box at test).", label="tab:patient"))
+
+    # macro bar chart
+    fig, ax = plt.subplots(figsize=(5, 4))
+    labels = list(pat.keys()); vals = [pat[l].get("patient_macro_f1", 0) for l in labels]
+    ax.bar(labels, vals, color=[PALETTE.get(l) for l in labels])
+    ax.set_ylabel("patient-level macro-F1"); ax.set_title("Patient-level (honest test)"); ax.set_ylim(0, 1)
+    for i, v in enumerate(vals):
+        ax.text(i, v + 0.01, f"{v:.3f}", ha="center")
+    savefig(fig, fig_dir, "patient_macro_bars")
+    log.info(f"patient-level macro: {dict((l, round(pat[l].get('patient_macro_f1',0),4)) for l in labels)}")
+
+
 # ---------------------------------------------------------------- L4 tables + text
 
 def write_tables(df, outputs_root, conds, cases_cfg, tab_dir, log):
@@ -510,6 +560,12 @@ def main() -> None:
             fig_confusion_roc_pr(outputs_root, conds, cases_cfg, fig_dir, device, log)
         except Exception as e:
             log.warning(f"re-inference figures skipped: {e}")
+
+    # Patient-level (honest full-image test) — guarded
+    try:
+        patient_outputs(outputs_root, fig_dir, tab_dir, log)
+    except Exception as e:
+        log.warning(f"patient-level section skipped: {e}")
 
     # Tables + text
     write_tables(df, outputs_root, conds, cases_cfg, tab_dir, log)
