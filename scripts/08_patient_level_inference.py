@@ -1,15 +1,15 @@
-"""Phase 08: patient-level inference on FULL images (no GT box at test) — the honest test.
+"""Phase 08: patient-level inference on FULL images (no GT box at test) — honest test.
 
-For a condition, load the 4 case window-classifiers (outputs/<cond>_win/<case>/densenet121/best.pth).
-For each full image, tile 128x128 windows at stride 96, score every window with each case model,
-and set image_score[disease] = max window probability (from the case that owns that disease).
+COUNT-BASED aggregation (fix for the max-aggregation false-positive flood):
+  An image is predicted positive for disease d iff the NUMBER of windows scoring >= tau_win
+  is >= K_d. A real lesion fires a CLUSTER of overlapping windows; isolated false positives do
+  not reach K. (tau_win, K_d) are calibrated per disease on a train-side validation set (full
+  images), never on test.
 
-  --mode calibrate : on train-side internal_val FULL images (GT from train_labels.csv) -> per-disease
-                     threshold τ_d maximising F1.  Writes thresholds.json.
-  --mode test       : on the official test FULL images (GT from test_labels.csv) -> apply τ_d ->
-                     patient-level per-disease P/R/F1 + macro.  Writes metrics.json/per_disease.md.
+  --mode calibrate : internal_val full images (GT from train_labels.csv) -> per-disease (tau,K)
+  --mode test       : official test full images (GT from test_labels.csv) -> patient-level F1
 
-The test path NEVER opens an annotations (box) file — verified by construction.
+The test path never opens an annotations (box) file.
 """
 from __future__ import annotations
 
@@ -35,6 +35,8 @@ from src.utils.logging import get_logger
 NO_FINDING = "No finding"
 DISEASES = ["Osteophytes", "Disc space narrowing", "Other lesions", "Foraminal stenosis",
             "Surgical implant", "Spondylolysthesis", "Vertebral collapse"]
+TAU_GRID = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95]      # window-level probability thresholds
+K_GRID = [1, 2, 3, 4, 5, 7, 10, 15, 20, 30]     # min #firing-windows for an image-level positive
 
 
 def _device():
@@ -46,7 +48,6 @@ def case_label_columns(b): return list(b["positives"]) + [NO_FINDING]
 
 
 def load_case_models(cond_root: Path, cases_cfg, backbone, device, log):
-    """Return {case: (model, label_cols)} and disease->case owner map."""
     models, owner = {}, {}
     for case, body in cases_cfg["cases"].items():
         label_cols = case_label_columns(body)
@@ -63,29 +64,31 @@ def load_case_models(cond_root: Path, cases_cfg, backbone, device, log):
 
 @torch.no_grad()
 def score_image(path, models, owner, tf, device, win, stride, batch=256):
+    """Return {disease: [count at each TAU_GRID level]} over all windows of the image."""
     img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    zero = {d: [0] * len(TAU_GRID) for d in DISEASES}
     if img is None:
-        return {d: 0.0 for d in DISEASES}
-    # gather windows
+        return zero
     tiles = [cv2.cvtColor(p, cv2.COLOR_GRAY2RGB) for _, _, p in sliding_windows(img, win, stride)]
     if not tiles:
-        return {d: 0.0 for d in DISEASES}
-    # per-case max prob over all windows
-    case_max = {case: np.zeros(len(lc)) for case, (_, lc) in models.items()}
+        return zero
+    # per-case, per-class counts at each tau level
+    case_counts = {case: np.zeros((len(lc), len(TAU_GRID)), dtype=np.int64) for case, (_, lc) in models.items()}
     for i in range(0, len(tiles), batch):
         chunk = tiles[i:i + batch]
         x = torch.stack([tf(image=t)["image"] for t in chunk]).to(device)
         for case, (m, lc) in models.items():
             p = torch.sigmoid(m(x)).cpu().numpy()           # (B, n_classes)
-            case_max[case] = np.maximum(case_max[case], p.max(axis=0))
-    scores = {}
+            for ti, tau in enumerate(TAU_GRID):
+                case_counts[case][:, ti] += (p >= tau).sum(axis=0)
+    out = {}
     for d in DISEASES:
         case = owner.get(d)
         if case is None or case not in models:
-            scores[d] = 0.0; continue
+            out[d] = [0] * len(TAU_GRID); continue
         _, lc = models[case]
-        scores[d] = float(case_max[case][lc.index(d)])
-    return scores
+        out[d] = case_counts[case][lc.index(d)].tolist()
+    return out
 
 
 def build_image_set(labels_csv):
@@ -97,16 +100,25 @@ def build_image_set(labels_csv):
     return rows
 
 
+def _f1(pred, gt):
+    tp = int(((pred == 1) & (gt == 1)).sum()); fp = int(((pred == 1) & (gt == 0)).sum())
+    fn = int(((pred == 0) & (gt == 1)).sum())
+    prec = tp / (tp + fp) if (tp + fp) else 0.0
+    rec = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
+    return f1, prec, rec, tp, fp, fn
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/base.yaml")
     ap.add_argument("--cases", default="configs/cases.yaml")
     ap.add_argument("--classifier", default="configs/classifier.yaml")
-    ap.add_argument("--cond-tag", required=True, help="e.g. baseline_win / traditional_win")
+    ap.add_argument("--cond-tag", required=True)
     ap.add_argument("--mode", choices=["calibrate", "test"], required=True)
     ap.add_argument("--win", type=int, default=128)
     ap.add_argument("--stride", type=int, default=96)
-    ap.add_argument("--limit", type=int, default=None, help="cap #images (smoke)")
+    ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--out-tag", default=None)
     args = ap.parse_args()
 
@@ -128,15 +140,11 @@ def main() -> None:
     models, owner = load_case_models(cond_root, cases_cfg, backbone, device, log)
     if not models:
         log.error("no case models loaded"); return
-    log.info(f"[{args.cond_tag}] loaded cases={list(models)} owner={owner}")
 
-    # GT label tables already have per-image one-hot + path
     audit = outputs_root / "01_audit"
     labels_csv = audit / ("train_labels.csv" if args.mode == "calibrate" else "test_labels.csv")
     images = build_image_set(labels_csv)
-
     if args.mode == "calibrate":
-        # restrict to internal_val image_ids (union across cases) so we don't tune on trained windows
         ival_ids = set()
         for case in cases_cfg["cases"]:
             f = outputs_root / "02_splits" / case / "internal_val.csv"
@@ -145,65 +153,66 @@ def main() -> None:
         images = [im for im in images if im["image_id"] in ival_ids]
     if args.limit:
         images = images[:args.limit]
-    log.info(f"[{args.mode}] scoring {len(images)} full images (stride={args.stride})")
+    log.info(f"[{args.mode}] {args.cond_tag}: scoring {len(images)} full images (stride={args.stride}, count-based)")
 
-    score_rows = []
+    # score all images -> counts
+    rows = []
     for k, im in enumerate(images):
-        s = score_image(im["path"], models, owner, tf, device, args.win, args.stride)
-        score_rows.append({"image_id": im["image_id"], **{f"score__{d}": s[d] for d in DISEASES},
-                           **{f"gt__{d}": im["gt"][d] for d in DISEASES}})
+        c = score_image(im["path"], models, owner, tf, device, args.win, args.stride)
+        row = {"image_id": im["image_id"]}
+        for d in DISEASES:
+            for ti in range(len(TAU_GRID)):
+                row[f"cnt__{d}__{ti}"] = c[d][ti]
+            row[f"gt__{d}"] = im["gt"][d]
+        rows.append(row)
         if (k + 1) % 50 == 0:
             log.info(f"  {k+1}/{len(images)}")
-    sdf = pd.DataFrame(score_rows)
+    sdf = pd.DataFrame(rows)
     sdf.to_csv(out_dir / f"scores_{args.mode}.csv", index=False)
 
     if args.mode == "calibrate":
         thresholds = {}
         for d in DISEASES:
-            sc = sdf[f"score__{d}"].to_numpy(); gt = sdf[f"gt__{d}"].to_numpy()
-            best_t, best_f1 = 0.5, -1.0
-            for t in np.linspace(0.05, 0.95, 19):
-                pred = (sc >= t).astype(int)
-                tp = int(((pred == 1) & (gt == 1)).sum()); fp = int(((pred == 1) & (gt == 0)).sum())
-                fn = int(((pred == 0) & (gt == 1)).sum())
-                f1 = tp / (tp + 0.5 * (fp + fn)) if (tp + fp + fn) else 0.0
-                if f1 > best_f1:
-                    best_f1, best_t = f1, float(t)
-            thresholds[d] = best_t
-            log.info(f"  τ[{d}]={best_t:.2f} (val F1={best_f1:.3f})")
+            gt = sdf[f"gt__{d}"].to_numpy()
+            best = {"f1": -1.0, "ti": 0, "tau": TAU_GRID[0], "K": 1}
+            for ti, tau in enumerate(TAU_GRID):
+                cnt = sdf[f"cnt__{d}__{ti}"].to_numpy()
+                for K in K_GRID:
+                    f1, *_ = _f1((cnt >= K).astype(int), gt)
+                    if f1 > best["f1"]:
+                        best = {"f1": f1, "ti": ti, "tau": tau, "K": K}
+            thresholds[d] = {"tau_win": best["tau"], "ti": best["ti"], "K": best["K"]}
+            log.info(f"  [{d}] tau_win={best['tau']} K={best['K']}  (val F1={best['f1']:.3f})")
         (out_dir / "thresholds.json").write_text(json.dumps(thresholds, indent=2))
         log.info(f"wrote {out_dir/'thresholds.json'}")
         return
 
-    # test mode: apply thresholds, patient-level metrics
+    # test
     th_path = out_dir / "thresholds.json"
     if not th_path.exists():
-        log.warning("no thresholds.json found in test out-dir; run --mode calibrate first. Using 0.5.")
-        thresholds = {d: 0.5 for d in DISEASES}
+        log.warning("no thresholds.json (run --mode calibrate first); defaulting tau=0.9,K=5")
+        thresholds = {d: {"tau_win": 0.9, "ti": TAU_GRID.index(0.9), "K": 5} for d in DISEASES}
     else:
         thresholds = json.loads(th_path.read_text())
-    per = {}
-    f1s = []
+    per = {}; f1s = []
     for d in DISEASES:
-        sc = sdf[f"score__{d}"].to_numpy(); gt = sdf[f"gt__{d}"].to_numpy()
-        pred = (sc >= thresholds.get(d, 0.5)).astype(int)
-        tp = int(((pred == 1) & (gt == 1)).sum()); fp = int(((pred == 1) & (gt == 0)).sum())
-        fn = int(((pred == 0) & (gt == 1)).sum())
-        prec = tp / (tp + fp) if (tp + fp) else 0.0
-        rec = tp / (tp + fn) if (tp + fn) else 0.0
-        f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
+        th = thresholds[d]; ti = int(th["ti"]); K = int(th["K"])
+        cnt = sdf[f"cnt__{d}__{ti}"].to_numpy(); gt = sdf[f"gt__{d}"].to_numpy()
+        f1, prec, rec, tp, fp, fn = _f1((cnt >= K).astype(int), gt)
         per[d] = {"precision": round(prec, 4), "recall": round(rec, 4), "f1": round(f1, 4),
-                  "tp": tp, "fp": fp, "fn": fn, "n_pos": int(gt.sum()), "tau": thresholds.get(d, 0.5)}
+                  "tp": tp, "fp": fp, "fn": fn, "n_pos": int(gt.sum()),
+                  "tau_win": th["tau_win"], "K": K}
         f1s.append(f1)
     macro = float(np.mean(f1s))
     (out_dir / "metrics.json").write_text(json.dumps(
-        {"condition": args.cond_tag, "stride": args.stride, "patient_macro_f1": macro, "per_disease": per}, indent=2))
-    md = ["| disease | F1 | precision | recall | n_pos | τ |", "|---|---|---|---|---|---|"]
+        {"condition": args.cond_tag, "stride": args.stride, "aggregation": "count",
+         "patient_macro_f1": macro, "per_disease": per}, indent=2))
+    md = ["| disease | F1 | precision | recall | n_pos | tau_win | K |", "|---|---|---|---|---|---|---|"]
     for d in DISEASES:
-        p = per[d]; md.append(f"| {d} | {p['f1']:.4f} | {p['precision']:.4f} | {p['recall']:.4f} | {p['n_pos']} | {p['tau']:.2f} |")
-    md.append(f"| **macro** | **{macro:.4f}** |  |  |  |  |")
-    (out_dir / "per_disease.md").write_text(f"# Patient-level — {args.cond_tag}\n\n" + "\n".join(md))
-    log.info(f"[{args.cond_tag}] PATIENT-LEVEL macro-F1 = {macro:.4f}  -> {out_dir/'per_disease.md'}")
+        p = per[d]; md.append(f"| {d} | {p['f1']:.4f} | {p['precision']:.4f} | {p['recall']:.4f} | {p['n_pos']} | {p['tau_win']} | {p['K']} |")
+    md.append(f"| **macro** | **{macro:.4f}** |  |  |  |  |  |")
+    (out_dir / "per_disease.md").write_text(f"# Patient-level (count-agg) — {args.cond_tag}\n\n" + "\n".join(md))
+    log.info(f"[{args.cond_tag}] PATIENT-LEVEL macro-F1 = {macro:.4f}")
 
 
 if __name__ == "__main__":
